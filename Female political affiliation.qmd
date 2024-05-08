@@ -1,0 +1,547 @@
+---
+title: "DS202A- W07 Summative"
+author: "25512"
+format: html
+editor: visual
+self-contained: true
+---
+
+Importing required libraries
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)     
+library(readr)
+library(parsnip)
+library(yardstick)
+library(recipes)
+library(workflows)
+library(rpart)
+```
+
+Reading the data set
+
+```{r,message=FALSE, warning=FALSE }
+filepath <- "C:/Users/hanam/Desktop/DS202A/data/df_consolidatingprogress_V1.csv"
+df <- read_csv(filepath)
+```
+
+# Part 1:
+
+Creating a column called 'bmr_transition' to assume the values 'autocracy to democracy' or 'democracy to autocracy'. As 'democracy_bmr' is a binary variable in which '1' indicates democracy and '0' indicates autocracy, when 'democracy_bmr' is 1, which is greater than the lagged version of 0, it indicates a change from autocracy to democracy, and the inverse indicates a change from democracy to autocracy. When 'democracy_bmr' and 'lag_democracy_bmr' assume the same values the binary variable will be set to n/a.
+
+```{r}
+df_bmr_changed <-
+  df %>%
+  mutate(
+    bmr_transition = case_when(
+      democracy_bmr == 0 & lag_democracy_bmr == 1 ~ "democracy to autocracy",
+      democracy_bmr == 1 & lag_democracy_bmr == 0 ~ "autocracy to democracy",
+      TRUE ~ NA
+    )
+ )
+df_bmr_changed
+```
+
+Here I am dropping the N/A values to include only rows that have experienced a change in regime. Therefore I believe this dataframe shall only include years which have undergone change. I am also filtering 'df_bmr_changed' to include only countries, years, and bmr_transition.
+
+```{r}
+df_bmr_changed <-
+  df_bmr_changed %>% 
+  select(country_name, year, bmr_transition) %>%
+  arrange(year) %>%
+  group_by(country_name)%>%
+  drop_na()
+df_bmr_changed
+```
+
+Here is a tally of the number of regime changes by country (step 4).
+
+```{r}
+df_bmr_changed %>% group_by(country_name) %>% tally()
+```
+
+```{r}
+df_bmr_changed %>% group_by(bmr_transition) %>% tally()
+```
+
+The above indicate the number of regime changes in total. Comparing the 2 tallys, majority of regime changes entail a change to democracy. And majority of the countries in this data set undergo several regime changes from 1967 to 2019.
+
+# Part 2
+
+#baseline model
+
+Here I am creating the binary target variable 'is_share_female_up' which is set to 1 if 'share_female' is 10% larger than 'lag_share_female' from the previous year, and is set to 0 if not.
+
+```{r}
+df_female3 <- df %>%
+  arrange(year) %>%
+  group_by(country_name)%>%
+  mutate(is_share_female_up = if_else(share_female > 1.1*lag_share_female, 1,0))%>%
+    tidyr::drop_na(is_share_female_up, lag_share_female, share_female_high,share_female) %>%
+    arrange(desc(year), country_name) %>%
+    select(year, country_name, share_female, lag_share_female, is_share_female_up, share_female_high, v2x_gender, v2lgfemleg)
+```
+
+Here I am creating my training and testing set in which the testing set is the last year of the data set and the training set is every year predating it. I am also converting 'is_share_female_up' to a categorical variable.
+
+```{r}
+df_female3 <- 
+    df %>% 
+    arrange(year) %>%
+  drop_na(share_female)%>%
+    mutate(is_share_female_up = if_else(share_female > 1.1*lag_share_female, 1, 0),
+      is_share_female_up = factor(is_share_female_up, levels=c(0,1))
+    ) %>%
+    tidyr::drop_na(is_share_female_up,lag_share_female, share_female_high,share_female) %>%
+    arrange(desc(year), country_name) %>%
+    select(year, country_name, share_female, lag_share_female, share_female_high, is_share_female_up, v2lgfemleg, v2x_gender)
+
+female_training_set3 <- df_female3 %>% filter(year <= 2020)
+female_test_set3 <- df_female3 %>% filter(year > 2020)
+```
+
+I'm creating my logistic model with the single predictor variable of 'share_female_high' which represents the share of female ministers occupying high positions only.
+
+```{r}
+logistic_model3 <- 
+  logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")%>%
+  fit(is_share_female_up ~ share_female_high, data = female_training_set3)
+# Look at the coefficients
+logistic_model3$fit
+```
+
+The coefficient for 'share_female_high' (0.02008) suggests that as the current share of female ministers in significant positions increases, the likelihood of having a 10% yearly increase in the share of female ministers in such roles also increases. when the share of female ministers in high positions is 0, the probability of a 10% increase in female ministers is -1.5 (intercept= -1.52205).
+
+```{r}
+plot_df3 <- logistic_model3 %>% augment(female_training_set3)
+
+min_x <- plot_df3 %>% filter(share_female_high == min(share_female_high)) %>% slice(1)
+max_x <- plot_df3 %>% filter(share_female_high == max(share_female_high)) %>% slice(1)
+
+
+g3 <- ggplot(plot_df3, aes(x = share_female_high, y = .pred_1)) +
+  geom_point(size = 2, alpha = 0.3, stroke = 1) +
+  scale_color_brewer(name = "Country", palette = "Set1") +
+  labs(
+    x = "Average female share of ministers by high positions", 
+    y = "Probability the share of female ministers will increase by 10%",
+    subtitle = "The predictions are bounded between 0 and 1"
+  ) + 
+  theme_bw()
+g3
+```
+
+```{r}
+my_threshold <- 0.1
+
+logistic_model3 %>% 
+    augment(female_training_set3) %>%
+    mutate(.pred_class = .pred_1 > my_threshold,
+       .pred_class = factor(.pred_class, 
+                            labels=c(0,1), 
+                            levels=c(FALSE, TRUE), 
+                            ordered=TRUE)) %>%
+    conf_mat(truth=is_share_female_up, estimate=.pred_class) %>%
+    summary(estimator="binary", event_level="second") %>%
+    knitr::kable()
+```
+
+An accuracy of 0.1960831 means that only approximately 19.61% of the predictions made by the model were correct.A value of 1.0 means that the model was able to correctly identify all actual positive instances.An f1 value of 0.3278754 indicates the balance between precision and recall is relatively low.
+
+```{r}
+logistic_model3 %>% 
+    augment(female_training_set3) %>%
+    roc_curve(truth=is_share_female_up, .pred_1, event_level="second") %>%
+    autoplot() +
+    geom_point(aes(x=1-specificity, y=sensitivity, color=.threshold)) + 
+    scale_color_gradient(low = "#c6733c", high="#3cc6b8", limits=c(0, 1)) + 
+    labs( 
+         x="(1 - specificity) = 1 - TN/N",
+         y="(sensitivity) = TP/P")
+```
+
+```{r}
+logistic_model3 %>% 
+    augment(female_training_set3) %>%
+    roc_auc(truth=is_share_female_up, .pred_1, event_level="second")
+```
+
+An AUC value of 0.56 on the training set suggests that the model's ability to distinguish between positive and negative instances is moderately effective. An AUC of 0.56 indicates that the model performs slightly better than random chance (50%).
+
+```{r}
+logistic_model3 %>% 
+    augment(female_test_set3) %>%
+    roc_curve(truth=is_share_female_up, .pred_1, event_level="second") %>%
+    autoplot() +
+    geom_point(aes(x=1-specificity, y=sensitivity, color=.threshold)) + 
+    scale_color_gradient(low = "#c6733c", high="#3cc6b8", limits=c(0, 1)) + 
+    labs( 
+         x="(1 - specificity) = 1 - TN/N",
+         y="(sensitivity) = TP/P")
+```
+
+```{r}
+logistic_model3 %>% 
+    augment(female_test_set3) %>%
+    roc_auc(truth=is_share_female_up, .pred_1, event_level="second")
+```
+
+A higher AUC value of 0.63 on the test set indicates that the model's performance on unseen or new data (the test set) is somewhat better compared to the performance on the training set. An AUC of 0.63 suggests a moderate level of discriminatory power, showing that the model is better at distinguishing between positive and negative instances in the test data compared to the training data.
+
+#baseline model- 2
+
+repeating the same steps as baseline model 3, except with the predictor 'v2x_gender' which represents a female empowerment index.
+
+```{r}
+df_female4 <- df %>%
+  arrange(year) %>%
+  drop_na(share_female)%>%
+  drop_na(lag_share_female)%>%
+  mutate(is_share_female_up = if_else(share_female > 1.1*lag_share_female, 1,0))%>%
+    tidyr::drop_na(is_share_female_up) %>%
+    arrange(desc(year), country_name) %>%
+    select(year, country_name, share_female, lag_share_female, is_share_female_up, v2x_gender)
+```
+
+```{r}
+df_female4 <- 
+    df %>% 
+    arrange(year) %>%
+  drop_na(share_female)%>%
+    mutate(is_share_female_up = if_else(share_female > 1.1*lag_share_female, 1, 0),
+      is_share_female_up = factor(is_share_female_up, levels=c(0,1))
+    ) %>%
+    tidyr::drop_na(is_share_female_up) %>%
+    arrange(desc(year), country_name) %>%
+    select(year, country_name, share_female, lag_share_female, v2x_gender, is_share_female_up)
+
+female_training_set4 <- df_female4 %>% filter(year <= 2020)
+female_test_set4 <- df_female4 %>% filter(year > 2020)
+```
+
+```{r}
+logistic_model4 <- 
+  logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")%>%
+  fit(is_share_female_up ~ v2x_gender, data = female_training_set4)
+# Look at the coefficients
+logistic_model4$fit
+```
+
+For each one-unit increase in the female empowerment index ('v2x_gender'), the log-odds of observing a 10% increase in the share of female ministers increase by 1.981.Furthermore, when the predictor v2x_gender (or female empowerment) is zero, the probability of the a 10% yearly increase in female ministers is approximately -2.669.
+
+```{r}
+plot_df4 <- logistic_model4 %>% augment(female_training_set4)
+
+min_x <- plot_df4 %>% filter(v2x_gender == min(v2x_gender)) %>% slice(1)
+max_x <- plot_df4 %>% filter(v2x_gender == max(v2x_gender)) %>% slice(1)
+
+
+g4 <- ggplot(plot_df4, aes(x = v2x_gender, y = .pred_1)) +
+  geom_point(size = 2, alpha = 0.3, stroke = 1) +
+  scale_color_brewer(name = "Country", palette = "Set1") +
+  labs(
+    x = "Average female empowerment", 
+    y = "Probability the share of female ministers will increase by 10%",
+    subtitle = "The predictions are bounded between 0 and 1"
+  ) + 
+  theme_bw()
+g4
+```
+
+```{r}
+my_threshold <- 0.2
+
+logistic_model4 %>% 
+    augment(female_training_set4) %>%
+    mutate(.pred_class = .pred_1 > my_threshold,
+       .pred_class = factor(.pred_class, 
+                            labels=c(0,1), 
+                            levels=c(FALSE, TRUE), 
+                            ordered=TRUE)) %>%
+    conf_mat(truth=is_share_female_up, estimate=.pred_class) %>%
+    summary(estimator="binary", event_level="second") %>%
+    knitr::kable()
+```
+
+An accuracy of 0.56 means that approximately 56.23% of the predictions made by the model were correct.A precision of 0.2606197 implies that out of the instances the model predicted as positive, only about 26.06% were actually correct. A recall of 0.64 suggests that the model was able to correctly identify about 64.15% of the actual positive instances. Lastly, An f1 value of 0.3706468 indicates the balance between precision and recall is relatively moderate.
+
+```{r}
+logistic_model4 %>% 
+    augment(female_training_set4) %>%
+    roc_curve(truth=is_share_female_up, .pred_1, event_level="second") %>%
+    autoplot() +
+    geom_point(aes(x=1-specificity, y=sensitivity, color=.threshold)) + 
+    scale_color_gradient(low = "#c6733c", high="#3cc6b8", limits=c(0, 1)) + 
+    labs( 
+         x="(1 - specificity) = 1 - TN/N",
+         y="(sensitivity) = TP/P")
+```
+
+```{r}
+logistic_model4 %>% 
+    augment(female_training_set4) %>%
+    roc_auc(truth=is_share_female_up, .pred_1, event_level="second")
+```
+
+An AUC of 0.62 indicates the model's ability to distinguish between positive and negative instances in the training set. It suggests a moderate discriminatory power of the model in correctly ranking or sorting the classes.
+
+```{r}
+logistic_model4 %>% 
+    augment(female_test_set4) %>%
+    roc_curve(truth=is_share_female_up, .pred_1, event_level="second") %>%
+    autoplot() +
+    geom_point(aes(x=1-specificity, y=sensitivity, color=.threshold)) + 
+    scale_color_gradient(low = "#c6733c", high="#3cc6b8", limits=c(0, 1)) + 
+    labs( 
+         x="(1 - specificity) = 1 - TN/N",
+         y="(sensitivity) = TP/P")
+```
+
+```{r}
+logistic_model4 %>% 
+    augment(female_test_set4) %>%
+    roc_auc(truth=is_share_female_up, .pred_1, event_level="second")
+```
+
+A lower AUC value of 0.53 on the test set suggests a reduced performance in discrimination compared to the training set. An AUC of 0.53 implies the model's ability to distinguish between positive and negative instances in the test set is only slightly better than random chance (50%).
+
+***Commentary***
+
+I created 5 baseline models. Although I only included the codes for model 3 and 4 for the sake of simplicity. This is the run through of each model via the predictors I chose and their goodness of fit/ predictive power.
+
+1.  **Model 1 - lag_share_female**: This model utilized a lagged variable representing the percentage of female ministers. It achieved an F1 score of 0.33 at a threshold of 0.1. The AUC for the training set was 0.55, while the test set exhibited a lower AUC of 0.47. This model showcased limited generalization to new data, possibly due to its focus solely on lagged female representation.
+
+2.  **Model 2 - lag2_share_female**: Employing the percentage of female ministers two years prior as the predictor, this model yielded an F1 score of 0.33 at a threshold of 0.1. The training set AUC was 0.57, with the test set AUC at 0.43, indicating a similar challenge in generalization as observed in the first model.
+
+3.  **Model 3 - share_female_high**: This model focused on the percentage of female ministers in high positions and produced an F1 score of 0.33 at a threshold of 0.1. Surprisingly, it showcased superior performance with an AUC of 0.56 for the training set and an impressive 0.63 for the test set, demonstrating robustness in generalization to unseen data.
+
+4.  **Model 4 - v2x_gender**: Utilizing the female empowerment index as the predictor, this model achieved the highest training set AUC of 0.62. However, its test set AUC dropped to 0.53, indicating potential overfitting to the training data, reducing its effectiveness in predicting on new instances.
+
+5.  **Model 5 - v2lgfemleg**: This baseline model, utilizing another representation of female legislative empowerment, obtained an F1 score of 0.35 with a threshold of 0.2. The training set AUC stood at 0.59, but the test set performance decreased with an AUC of 0.49.
+
+In conclusion, upon evaluating the models, the top two performers that exhibit promising generalization to unseen data are Model 3 (share_female_high) and Model 4 (v2x_gender). Model 3 displayed consistent and robust performance with the highest AUC on the test set (0.63), indicating its potential to effectively predict beyond the training data. Model 4 showcased the highest training set AUC (0.62), but its slightly diminished test set performance (0.53) suggests a potential for overfitting. Thus, considering both generalization and robustness, Models 3 and 4 emerge as the most promising, warranting their inclusion as the final baseline models.
+
+# Part 3
+
+I will be conducting more robust cross-validation on model 3- with the predictor share_female_high as it produced the highest AUC on the testing set.
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyr)     
+library(yardstick) 
+library(parsnip)   
+library(recipes)   
+library(workflows) 
+library(rpart)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(readr)
+library(tidymodels)
+```
+
+Here I am creating a data set with a smaller set of 10 randomly selected countries in order to conduct rolling window resample on. It is based off the logistic model of my 3rd baseline model as it produced the highest AUC for the testing set.
+
+```{r}
+df_small <-df_female3 %>%
+  filter(country_name %in% sample(unique(df_female3$country_name), 10)) %>%
+   arrange(year) %>%
+  drop_na(share_female)%>%
+    mutate(is_share_female_up = if_else(share_female > 1.1*lag_share_female, 1, 0),
+      is_share_female_up = factor(is_share_female_up, levels=c(0,1))
+    ) %>%
+    tidyr::drop_na(is_share_female_up,lag_share_female, share_female_high,share_female) %>%
+    arrange(desc(year), country_name) %>%
+    select(year, country_name, share_female, lag_share_female, share_female_high, is_share_female_up)
+```
+
+```{r}
+logistic_model6<- 
+  logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")%>%
+  fit(is_share_female_up ~ share_female_high, data = df_small)
+```
+
+**Resampling- time series cross-validation**
+
+```{r}
+library(rsample)
+roll_rs <- rolling_origin(df_small,   
+               initial = 10 * 5, 
+               assess = 10 * 5, 
+               cumulative = FALSE)
+```
+
+I randomly selected 10 countries to conduct a rolling sample on for 5 years of data as the original data frame has 171 countries and 54 countries and it would be too strenuous for R to run.
+
+```{r}
+roll_rs %>% nrow()
+```
+
+my data has been split into 381 iterations.
+
+```{r}
+roll_rs$splits[[1]]
+```
+
+50 samples are used for training the model. Another set of 50 samples are held out to assess or validate the model's performance. Overall, there are 494 samples in the entire dataset (Total).
+
+```{r}
+analysis(roll_rs$splits[[1]]) %>% summarise(min_date=min(year), max_date=max(year))
+```
+
+The range of years present in the training data of the first split of the resampling process.
+
+```{r}
+assessment(roll_rs$splits[[1]]) %>% summarise(min_date=min(year), max_date=max(year))
+```
+
+```{r}
+logistic_model6<- 
+    logistic_reg() %>% 
+    set_engine("glm") %>% 
+    set_mode("classification") 
+```
+
+```{r, message=FALSE, warning=FALSE}
+results <- fit_resamples(logistic_model6, is_share_female_up ~ ., roll_rs)
+```
+
+```{r}
+# See the AUC for a selected split
+results$.metrics[[100]]
+```
+
+The AUC from the 100th fold of my cross-validation indicates the logistic model generalizes to unseen data well. Compared to the training set of 2021 I conducted in part 2 in which the AUC was 0.63, this indicated that 'share_female_high' as the predictor generalizes well, and predicts 'is_share_female_up' moderately well.
+
+```{r}
+collect_metrics(results)
+```
+
+The accuracy is approximately 0.851 (or 85.1%). The ROC AUC is approximately 0.891 indicating good discrimination between positive and negative classifications. Although this may not be truly representative of the robustness of my baseline model, as it's important to note I've only conducted this time-series cross-validation on a very small subset of my original data. The reason for doing so is when I attempted to analyze my whole data frame my R would take hours to run the resampling hence why I opted for a smaller subset.
+
+**Feature engineering**
+
+I'm going to create a more complex version of my baseline model using the predictors I experimented with in part 2.
+
+```{r}
+final_df <- df %>%
+  arrange(year) %>%
+  group_by(country_name)%>%
+  mutate(lag2_share_female= lag(share_female, 2),
+    is_share_female_up = if_else(share_female > 1.1*lag_share_female, 1,0))%>%
+    tidyr::drop_na(is_share_female_up, lag_share_female, share_female_high,share_female, v2lgfemleg, v2x_gender, lag2_share_female) %>%
+    arrange(desc(year), country_name) %>%
+    select(year, country_name, share_female, lag_share_female, lag2_share_female, is_share_female_up, share_female_high, v2x_gender, v2lgfemleg)
+```
+
+```{r}
+final_df <- 
+    df %>% 
+    arrange(year) %>%
+  drop_na(share_female)%>%
+    mutate(lag2_share_female= lag(share_female, 2),
+      is_share_female_up = if_else(share_female > 1.1*lag_share_female, 1, 0),
+      is_share_female_up = factor(is_share_female_up, levels=c(0,1))
+    ) %>%
+    tidyr::drop_na(is_share_female_up,lag_share_female, share_female_high,share_female, v2lgfemleg, v2x_gender, lag2_share_female) %>%
+    arrange(desc(year), country_name) %>%
+    select(year, country_name, share_female, lag_share_female, lag2_share_female, v2x_gender, v2lgfemleg, share_female_high, is_share_female_up)
+
+training_df <- final_df %>% filter(year <= 2020)
+testing_df <- final_df %>% filter(year > 2020)
+```
+
+Here I created a double lagged predictor for 'share_female' and adjusted my data frame to include multiple predictors.
+
+In the following code I am including multiple predictors in order to create a model with better predictive power of 'is_share_female_up'.
+
+```{r}
+logistic_model_final <- 
+  logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")%>%
+  fit(is_share_female_up ~ v2x_gender + v2lgfemleg + lag2_share_female + lag_share_female + share_female_high, data = training_df)
+# Look at the coefficients
+logistic_model_final$fit
+```
+
+Here is the following rundown of my model coefficients:
+
+-   v2x_gender- the probability that there will be a 10% increase in female ministers in the next year increases by 2.3 units for every unit increase in female empowerment.
+
+-   v2lgfemleg- the probability of a 10% yearly increase in female ministers increases by 0.028 units for every one unit increase the share of lower chamber female ministers.
+
+-   lag2_share_female- the probability of a 10% yearly increase in female ministers increases by 0.01% for every unit increase in the share of female ministers 2 years ago.
+
+-   lag_share_female- the probability of a 10% yearly increase in female ministers decreases by -0.06% for every unit increase in the share of female ministers a year ago.
+
+-   share_female_high- the probability of a 10% increase in female ministers yearly increases by 0.03% for every unit increase in the share of female ministers in high positions.
+
+```{r}
+my_threshold <- 0.2
+
+logistic_model_final %>% 
+    augment(training_df) %>%
+    mutate(.pred_class = .pred_1 > my_threshold,
+       .pred_class = factor(.pred_class, 
+                            labels=c(0,1), 
+                            levels=c(FALSE, TRUE), 
+                            ordered=TRUE)) %>%
+    conf_mat(truth=is_share_female_up, estimate=.pred_class) %>%
+    summary(estimator="binary", event_level="second") %>%
+    knitr::kable()
+```
+
+I chose my threshold of 0.2 as it produced the highest f1 value of 0.4. The model has an accuracy of approximately 59.6%, which is the overall correct prediction rate. The precision of around 29.2% suggests that when the model predicts the positive class, it's correct about 29.2% of the time. The recall of approximately 64.6% indicates that the model can identify around 64.6% of the actual positive instances. Lastly, the F1 score of about 40.2% represents a balance between precision and recall.
+
+```{r}
+logistic_model_final %>% 
+    augment(training_df) %>%
+    roc_curve(truth=is_share_female_up, .pred_1, event_level="second") %>%
+    autoplot() +
+    geom_point(aes(x=1-specificity, y=sensitivity, color=.threshold)) + 
+    scale_color_gradient(low = "#c6733c", high="#3cc6b8", limits=c(0, 1)) + 
+    labs( 
+         x="(1 - specificity) = 1 - TN/N",
+         y="(sensitivity) = TP/P")
+```
+
+```{r}
+logistic_model_final %>% 
+    augment(training_df) %>%
+    roc_auc(truth=is_share_female_up, .pred_1, event_level="second")
+```
+
+The AUC of 0.67 on the training set suggests that the model performs moderately well in distinguishing between the two classes based on the training data. It's better than random guessing (AUC = 0.5), but there is room for improvement
+
+```{r}
+logistic_model_final %>% 
+    augment(testing_df) %>%
+    roc_curve(truth=is_share_female_up, .pred_1, event_level="second") %>%
+    autoplot() +
+    geom_point(aes(x=1-specificity, y=sensitivity, color=.threshold)) + 
+    scale_color_gradient(low = "#c6733c", high="#3cc6b8", limits=c(0, 1)) + 
+    labs( 
+         x="(1 - specificity) = 1 - TN/N",
+         y="(sensitivity) = TP/P")
+```
+
+```{r}
+logistic_model_final %>% 
+    augment(testing_df) %>%
+    roc_auc(truth=is_share_female_up, .pred_1, event_level="second")
+```
+
+While an AUC of 0.66 indicates some ability to distinguish between classes, further analysis and improvement of the model might be beneficial to enhance its predictive performance.However, having a similar AUC of 0.66 on the testing set indicates that the model's performance is consistent when presented with new, unseen data.
+
+***Commentary***
+
+There has shown significant improvement in accuracy, precision, and f1 scores compared to my baseline model (model 3). My f1 measure has increased from 0.33 to 0.4 indicating a greater balance between precision and recall. The AUC shows similar generalization to the test data compared to my baseline (0.63 vs. 0.66) however there is a vast improvement of the AUC between my baseline model training set and my final model (0.56 vs. 0.67) indicating my updated model has better predictive power and more significant predictors.

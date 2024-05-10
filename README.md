@@ -1,6 +1,8 @@
 # Political-affiliation-prediction
- 
-Analysis of Regime Changes and Female Minister Representation: 
+
+We will be using the following dataset published by Dr Stuart Bramwell:
+
+Nyrup, Jacob, Hikaru Yamagishi, and Stuart Bramwell. 2023a. “Replication Data for: Consolidating Progress: The Selection of Female Ministers in Autocracies and Democracies.” Harvard Dataverse, v1 
 
 Overview
 This project involves two main analyses: the investigation of regime changes between autocracy and democracy at the country level and the examination of the increase in female ministers in cabinet positions.
